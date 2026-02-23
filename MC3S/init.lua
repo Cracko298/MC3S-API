@@ -194,4 +194,43 @@ function Texture:color_shift(r, g, b, a)
     return self
 end
 
+function Texture:flip_vertical()
+    local p = self.pixels
+    local new_p = {}
+    local w, h = self.width, self.height
+    
+    for y = 0, h - 1 do
+        local srcY = y
+        local dstY = h - 1 - y
+        for x = 0, w - 1 do
+            local srcIdx = (srcY * w + x) * 4
+            local dstIdx = (dstY * w + x) * 4
+            
+            for i = 1, 4 do new_p[dstIdx + i] = p[srcIdx + i] end
+        end
+    end
+    self.pixels = new_p
+    return self
+end
+
+function Texture:flip_horizontal()
+    local p = self.pixels
+    local new_p = {}
+    local w, h = self.width, self.height
+    
+    for y = 0, h - 1 do
+        for x = 0, w - 1 do
+            local srcX = x
+            local dstX = w - 1 - x
+            local srcIdx = (y * w + srcX) * 4
+            local dstIdx = (y * w + dstX) * 4
+            
+            -- Move RGBA block
+            for i = 1, 4 do new_p[dstIdx + i] = p[srcIdx + i] end
+        end
+    end
+    self.pixels = new_p
+    return self
+end
+
 return TextureModule
