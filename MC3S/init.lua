@@ -6,10 +6,6 @@ local TextureModule = {}
 local Texture = {}
 Texture.__index = Texture
 
------------------------------------------------------------
--- Internal Helpers
------------------------------------------------------------
-
 -- Precomputed Morton LUT for 8x8 tiles
 local morton_lut = {}
 for y = 0, 7 do
@@ -26,13 +22,18 @@ for y = 0, 7 do
     end
 end
 
--- Helper to convert 4 bytes to an integer (Little Endian)
 local function bytes_to_int(str, offset)
     local b1, b2, b3, b4 = string.byte(str, offset + 1, offset + 4)
     return b1 + (b2 * 256) + (b3 * 65536) + (b4 * 16777216)
 end
 
--- Helper for safe string conversion
+local function int_to_bytes(val)
+    return string.char(val % 256, 
+                       math.floor(val / 256) % 256, 
+                       math.floor(val / 65536) % 256, 
+                       math.floor(val / 16777216) % 256)
+end
+
 local function array_to_string(arr)
     local out = {}
     local chunk_size = 7000 
@@ -43,33 +44,35 @@ local function array_to_string(arr)
     return table.concat(out)
 end
 
------------------------------------------------------------
--- Main Loader (Detects File vs. Bytes)
------------------------------------------------------------
+-- Syncs the binary header with current self.width and self.height
+function Texture:_sync_header()
+    local h = self.header
+    self.header = h:sub(1, 12) .. int_to_bytes(self.width) .. 
+                 h:sub(17, 16) .. int_to_bytes(self.height) .. 
+                 h:sub(21)
+end
+
+
+-- load file
 
 function TextureModule.load(input, w, h, is_tiled)
     local data
     local header = ""
     
-    -- Check if input is a valid file path
     local success, file = pcall(filesys.open, input, "rb")
     if success and file then
         local full_content = file:read("*all")
         file:close()
-        
-        -- Extract dimensions from 0x20 header
         w = bytes_to_int(full_content, 0x0C)
         h = bytes_to_int(full_content, 0x10)
         header = full_content:sub(1, 0x20)
-        data = full_content:sub(0x21) -- Pixel data starts after 0x20
+        data = full_content:sub(0x21)
     else
-        -- Treat as raw bytes
         if not w or not h then
-            error("Dimensions (width and height) are required when loading raw bytes.")
+            error("Dimensions required for raw bytes.")
         end
         data = input
-        -- Create a dummy header if none exists to keep export consistent
-        header = string.rep("\0", 32) 
+        header = string.rep("\0", 12) .. int_to_bytes(w) .. string.rep("\0", 0) .. int_to_bytes(h) .. string.rep("\0", 12)
     end
 
     local self = setmetatable({}, Texture)
@@ -78,87 +81,81 @@ function TextureModule.load(input, w, h, is_tiled)
     self.header = header
     self.pixels = {}
 
-    -- Decode bytes into array
-    for i = 1, #data do
-        self.pixels[i] = string.byte(data, i)
-    end
-
-    if is_tiled then
-        self:_untile()
-    end
+    for i = 1, #data do self.pixels[i] = string.byte(data, i) end
+    if is_tiled then self:_untile() end
 
     return self
 end
 
------------------------------------------------------------
--- Tiling Logic
------------------------------------------------------------
-
-function Texture:_untile()
-    local linear = {}
-    local w, h = self.width, self.height
-    local tilesPerRow = math.floor(w / 8)
-    local p = self.pixels
-
-    for y = 0, h - 1 do
-        local lutY = morton_lut[y % 8]
-        local tileY = math.floor(y / 8)
-        for x = 0, w - 1 do
-            local tileIndex = tileY * tilesPerRow + math.floor(x / 8)
-            local tiledIndex = (tileIndex * 64 + lutY[x % 8]) * 4
-            local linearIndex = (y * w + x) * 4
-
-            for i = 1, 4 do linear[linearIndex + i] = p[tiledIndex + i] end
-        end
-    end
-    self.pixels = linear
+function Texture:clone()
+    local copy = setmetatable({}, Texture)
+    copy.width = self.width
+    copy.height = self.height
+    copy.header = self.header
+    copy.pixels = {}
+    for i = 1, #self.pixels do copy.pixels[i] = self.pixels[i] end
+    return copy
 end
 
-function Texture:export_tiled()
-    local tiled = {}
-    local w, h = self.width, self.height
-    local tilesPerRow = math.floor(w / 8)
-    local p = self.pixels
-
-    for y = 0, h - 1 do
-        local lutY = morton_lut[y % 8]
-        local tileY = math.floor(y / 8)
-        for x = 0, w - 1 do
-            local tileIndex = tileY * tilesPerRow + math.floor(x / 8)
-            local tiledIndex = (tileIndex * 64 + lutY[x % 8]) * 4
-            local linearIndex = (y * w + x) * 4
-
-            for i = 1, 4 do tiled[tiledIndex + i] = p[linearIndex + i] end
-        end
-    end
-
-    return self.header .. array_to_string(tiled)
-end
-
------------------------------------------------------------
--- Manipulation Features
------------------------------------------------------------
-
--- Rotates the texture 90 degrees Clock-Wise
 function Texture:rotate_90()
     local p = self.pixels
     local new_p = {}
     local old_w, old_h = self.width, self.height
-    
     for y = 0, old_h - 1 do
         for x = 0, old_w - 1 do
             local srcIdx = (y * old_w + x) * 4
             local dstX = (old_h - 1) - y
             local dstY = x
             local dstIdx = (dstY * old_h + dstX) * 4
-            
             for i = 1, 4 do new_p[dstIdx + i] = p[srcIdx + i] end
         end
     end
-    
     self.pixels = new_p
     self.width = old_h
     self.height = old_w
+    self:_sync_header()
+    return self
+end
+
+function Texture:flip_vertical()
+    local p = self.pixels
+    local new_p = {}
+    local w, h = self.width, self.height
+    for y = 0, h - 1 do
+        local dstY = h - 1 - y
+        for x = 0, w - 1 do
+            local srcIdx = (y * w + x) * 4
+            local dstIdx = (dstY * w + x) * 4
+            for i = 1, 4 do new_p[dstIdx + i] = p[srcIdx + i] end
+        end
+    end
+    self.pixels = new_p
+    return self
+end
+
+function Texture:flip_horizontal()
+    local p = self.pixels
+    local new_p = {}
+    local w, h = self.width, self.height
+    for y = 0, h - 1 do
+        for x = 0, w - 1 do
+            local srcIdx = (y * w + x) * 4
+            local dstIdx = (y * w + (w - 1 - x)) * 4
+            for i = 1, 4 do new_p[dstIdx + i] = p[srcIdx + i] end
+        end
+    end
+    self.pixels = new_p
+    return self
+end
+
+function Texture:color_shift(r, g, b, a)
+    local p = self.pixels
+    local shifts = {r or 0, g or 0, b or 0, a or 0}
+    for i = 1, #p, 4 do
+        for j = 1, 4 do
+            p[i+j-1] = math.max(0, math.min(255, p[i+j-1] + shifts[j]))
+        end
+    end
     return self
 end
 
@@ -166,7 +163,6 @@ function Texture:replace_region(other_tex, startX, startY)
     local p, op = self.pixels, other_tex.pixels
     local bw, bh = self.width, self.height
     local rw, rh = other_tex.width, other_tex.height
-
     for y = 0, rh - 1 do
         local dstY = startY + y
         if dstY >= 0 and dstY < bh then
@@ -183,54 +179,40 @@ function Texture:replace_region(other_tex, startX, startY)
     return self
 end
 
-function Texture:color_shift(r, g, b, a)
+function Texture:_untile()
+    local linear = {}
+    local w, h = self.width, self.height
+    local tilesPerRow = math.floor(w / 8)
     local p = self.pixels
-    local shifts = {r or 0, g or 0, b or 0, a or 0}
-    for i = 1, #p, 4 do
-        for j = 1, 4 do
-            p[i+j-1] = math.max(0, math.min(255, p[i+j-1] + shifts[j]))
+    for y = 0, h - 1 do
+        local lutY = morton_lut[y % 8]
+        local tileY = math.floor(y / 8)
+        for x = 0, w - 1 do
+            local tileIndex = tileY * tilesPerRow + math.floor(x / 8)
+            local tiledIndex = (tileIndex * 64 + lutY[x % 8]) * 4
+            local linearIndex = (y * w + x) * 4
+            for i = 1, 4 do linear[linearIndex + i] = p[tiledIndex + i] end
         end
     end
-    return self
+    self.pixels = linear
 end
 
-function Texture:flip_vertical()
-    local p = self.pixels
-    local new_p = {}
+function Texture:export_tiled()
+    local tiled = {}
     local w, h = self.width, self.height
-    
+    local tilesPerRow = math.floor(w / 8)
+    local p = self.pixels
     for y = 0, h - 1 do
-        local srcY = y
-        local dstY = h - 1 - y
+        local lutY = morton_lut[y % 8]
+        local tileY = math.floor(y / 8)
         for x = 0, w - 1 do
-            local srcIdx = (srcY * w + x) * 4
-            local dstIdx = (dstY * w + x) * 4
-            
-            for i = 1, 4 do new_p[dstIdx + i] = p[srcIdx + i] end
+            local tileIndex = tileY * tilesPerRow + math.floor(x / 8)
+            local tiledIndex = (tileIndex * 64 + lutY[x % 8]) * 4
+            local linearIndex = (y * w + x) * 4
+            for i = 1, 4 do tiled[tiledIndex + i] = p[linearIndex + i] end
         end
     end
-    self.pixels = new_p
-    return self
-end
-
-function Texture:flip_horizontal()
-    local p = self.pixels
-    local new_p = {}
-    local w, h = self.width, self.height
-    
-    for y = 0, h - 1 do
-        for x = 0, w - 1 do
-            local srcX = x
-            local dstX = w - 1 - x
-            local srcIdx = (y * w + srcX) * 4
-            local dstIdx = (y * w + dstX) * 4
-            
-            -- Move RGBA block
-            for i = 1, 4 do new_p[dstIdx + i] = p[srcIdx + i] end
-        end
-    end
-    self.pixels = new_p
-    return self
+    return self.header .. array_to_string(tiled)
 end
 
 return TextureModule
