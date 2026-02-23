@@ -1,5 +1,6 @@
 # MC3S-API
 - MC3S is an API for Minecraft 3DS Skins in-real time. Allowing for for truly custom Skins, Textures, 2D Animations, and More using for use with LunaCore.
+- Very early development, and I highly suggest not depending on it until a full release is well... released.
 
 ---
 
