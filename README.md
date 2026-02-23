@@ -51,8 +51,8 @@ helmet:clone()              -- Work on a copy
 
 canvas:replace_region(helmet, 32, 48) -- add helmet to skin
 
--- 4. Export and save or do other operations.
+-- Export and save or do other operations.
 local binaryOut = skin:export_tiled()
-local f = Core.Filesystem.open("romfs/background_mod.bin", "wb")
+local f = Core.Filesystem.open("sdmc:/steveWithHelmet.3dst", "wb")
 f:write(binaryOut)
 f:close()
