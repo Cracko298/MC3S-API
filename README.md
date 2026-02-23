@@ -50,7 +50,7 @@ helmet:clone()              -- Work on a copy
     :flip_horizontal()      -- Mirror it
     :color_shift(0, 0, 255) -- Tint it blue
 
-canvas:replace_region(helmet, 32, 48) -- add helmet to skin
+skin:replace_region(helmet, 32, 48) -- add helmet to skin
 
 -- Export and save or do other operations.
 local binaryOut = skin:export_tiled()
