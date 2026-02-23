@@ -1,131 +1,197 @@
 local filesys = Core.Filesystem
 local debug = Core.Debug
 local memory = Core.Memory
-local texture = {}
 
--- File Helper
-local function read_texture_file(path)
-    local f = assert(filesys.open(path, "rb"))
-    local d = f:read("*all")
-    f:close()
-    return d:sub(0x20 + 1)
+local TextureModule = {}
+local Texture = {}
+Texture.__index = Texture
+
+-----------------------------------------------------------
+-- Internal Helpers
+-----------------------------------------------------------
+
+-- Precomputed Morton LUT for 8x8 tiles
+local morton_lut = {}
+for y = 0, 7 do
+    morton_lut[y] = {}
+    for x = 0, 7 do
+        local m = 0
+        if x % 2 == 1 then m = m + 1 end
+        if y % 2 == 1 then m = m + 2 end
+        if math.floor(x/2) % 2 == 1 then m = m + 4 end
+        if math.floor(y/2) % 2 == 1 then m = m + 8 end
+        if math.floor(x/4) % 2 == 1 then m = m + 16 end
+        if math.floor(y/4) % 2 == 1 then m = m + 32 end
+        morton_lut[y][x] = m
+    end
 end
 
--- Morton Helpers
-local function part1by1(n)
-    n = n % 8
-    n = (n + n * 4) % 256
-    n = n % 0x33
-    n = (n + n * 2) % 256
-    n = n % 0x55
-    return n
+-- Helper to convert 4 bytes to an integer (Little Endian)
+local function bytes_to_int(str, offset)
+    local b1, b2, b3, b4 = string.byte(str, offset + 1, offset + 4)
+    return b1 + (b2 * 256) + (b3 * 65536) + (b4 * 16777216)
 end
 
-local function morton2D(x, y)
-    return part1by1(x) + part1by1(y) * 2
+-- Helper for safe string conversion
+local function array_to_string(arr)
+    local out = {}
+    local chunk_size = 7000 
+    for i = 1, #arr, chunk_size do
+        local j = math.min(i + chunk_size - 1, #arr)
+        out[#out+1] = string.char(unpack(arr, i, j))
+    end
+    return table.concat(out)
 end
 
--- Tiled Index (Morton)
-local function get_tiled_index(x, y, width)
-    local tileX = math.floor(x / 8)
-    local tileY = math.floor(y / 8)
+-----------------------------------------------------------
+-- Main Loader (Detects File vs. Bytes)
+-----------------------------------------------------------
 
-    local tilesPerRow = math.floor(width / 8)
-    local tileIndex = tileY * tilesPerRow + tileX
+function TextureModule.load(input, w, h, is_tiled)
+    local data
+    local header = ""
+    
+    -- Check if input is a valid file path
+    local success, file = pcall(filesys.open, input, "rb")
+    if success and file then
+        local full_content = file:read("*all")
+        file:close()
+        
+        -- Extract dimensions from 0x20 header
+        w = bytes_to_int(full_content, 0x0C)
+        h = bytes_to_int(full_content, 0x10)
+        header = full_content:sub(1, 0x20)
+        data = full_content:sub(0x21) -- Pixel data starts after 0x20
+    else
+        -- Treat as raw bytes
+        if not w or not h then
+            error("Dimensions (width and height) are required when loading raw bytes.")
+        end
+        data = input
+        -- Create a dummy header if none exists to keep export consistent
+        header = string.rep("\0", 32) 
+    end
 
-    local inTileX = x % 8
-    local inTileY = y % 8
+    local self = setmetatable({}, Texture)
+    self.width = w
+    self.height = h
+    self.header = header
+    self.pixels = {}
 
-    local pixelIndexInTile = morton2D(inTileX, inTileY)
+    -- Decode bytes into array
+    for i = 1, #data do
+        self.pixels[i] = string.byte(data, i)
+    end
 
-    return (tileIndex * 8 * 8 + pixelIndexInTile) * 4
+    if is_tiled then
+        self:_untile()
+    end
+
+    return self
 end
 
--- Untile
-function texture.untile(tiledData, width, height)
+-----------------------------------------------------------
+-- Tiling Logic
+-----------------------------------------------------------
+
+function Texture:_untile()
     local linear = {}
+    local w, h = self.width, self.height
+    local tilesPerRow = math.floor(w / 8)
+    local p = self.pixels
 
-    for y = 0, height - 1 do
-        for x = 0, width - 1 do
-            local tiledIndex = get_tiled_index(x, y, width)
-            local linearIndex = (y * width + x) * 4
+    for y = 0, h - 1 do
+        local lutY = morton_lut[y % 8]
+        local tileY = math.floor(y / 8)
+        for x = 0, w - 1 do
+            local tileIndex = tileY * tilesPerRow + math.floor(x / 8)
+            local tiledIndex = (tileIndex * 64 + lutY[x % 8]) * 4
+            local linearIndex = (y * w + x) * 4
 
-            linear[linearIndex + 1] = tiledData:sub(tiledIndex + 1, tiledIndex + 1)
-            linear[linearIndex + 2] = tiledData:sub(tiledIndex + 2, tiledIndex + 2)
-            linear[linearIndex + 3] = tiledData:sub(tiledIndex + 3, tiledIndex + 3)
-            linear[linearIndex + 4] = tiledData:sub(tiledIndex + 4, tiledIndex + 4)
+            for i = 1, 4 do linear[linearIndex + i] = p[tiledIndex + i] end
         end
     end
-
-    return table.concat(linear)
+    self.pixels = linear
 end
 
--- Retile
-function texture.retile(linearData, width, height)
+function Texture:export_tiled()
     local tiled = {}
+    local w, h = self.width, self.height
+    local tilesPerRow = math.floor(w / 8)
+    local p = self.pixels
 
-    for y = 0, height - 1 do
-        for x = 0, width - 1 do
-            local linearIndex = (y * width + x) * 4
-            local tiledIndex = get_tiled_index(x, y, width)
+    for y = 0, h - 1 do
+        local lutY = morton_lut[y % 8]
+        local tileY = math.floor(y / 8)
+        for x = 0, w - 1 do
+            local tileIndex = tileY * tilesPerRow + math.floor(x / 8)
+            local tiledIndex = (tileIndex * 64 + lutY[x % 8]) * 4
+            local linearIndex = (y * w + x) * 4
 
-            tiled[tiledIndex + 1] = linearData:sub(linearIndex + 1, linearIndex + 1)
-            tiled[tiledIndex + 2] = linearData:sub(linearIndex + 2, linearIndex + 2)
-            tiled[tiledIndex + 3] = linearData:sub(linearIndex + 3, linearIndex + 3)
-            tiled[tiledIndex + 4] = linearData:sub(linearIndex + 4, linearIndex + 4)
+            for i = 1, 4 do tiled[tiledIndex + i] = p[linearIndex + i] end
         end
     end
 
-    return table.concat(tiled)
+    return self.header .. array_to_string(tiled)
 end
 
--- Replace region (Linear)
-function texture.replace_region_linear(baseData, baseW, baseH,
-                                       replaceData, repW, repH,
-                                       startX, startY)
+-----------------------------------------------------------
+-- Manipulation Features
+-----------------------------------------------------------
 
-    local result = { baseData:byte(1, #baseData) }
+-- Rotates the texture 90 degrees Clock-Wise
+function Texture:rotate_90()
+    local p = self.pixels
+    local new_p = {}
+    local old_w, old_h = self.width, self.height
+    
+    for y = 0, old_h - 1 do
+        for x = 0, old_w - 1 do
+            local srcIdx = (y * old_w + x) * 4
+            local dstX = (old_h - 1) - y
+            local dstY = x
+            local dstIdx = (dstY * old_h + dstX) * 4
+            
+            for i = 1, 4 do new_p[dstIdx + i] = p[srcIdx + i] end
+        end
+    end
+    
+    self.pixels = new_p
+    self.width = old_h
+    self.height = old_w
+    return self
+end
 
-    for y = 0, repH - 1 do
-        for x = 0, repW - 1 do
+function Texture:replace_region(other_tex, startX, startY)
+    local p, op = self.pixels, other_tex.pixels
+    local bw, bh = self.width, self.height
+    local rw, rh = other_tex.width, other_tex.height
 
-            local dstX = startX + x
-            local dstY = startY + y
-
-            if dstX < baseW and dstY < baseH then
-                local dstIndex = (dstY * baseW + dstX) * 4
-                local srcIndex = (y * repW + x) * 4
-
-                result[dstIndex + 1] = replaceData:byte(srcIndex + 1)
-                result[dstIndex + 2] = replaceData:byte(srcIndex + 2)
-                result[dstIndex + 3] = replaceData:byte(srcIndex + 3)
-                result[dstIndex + 4] = replaceData:byte(srcIndex + 4)
+    for y = 0, rh - 1 do
+        local dstY = startY + y
+        if dstY >= 0 and dstY < bh then
+            for x = 0, rw - 1 do
+                local dstX = startX + x
+                if dstX >= 0 and dstX < bw then
+                    local dstIdx = (dstY * bw + dstX) * 4
+                    local srcIdx = (y * rw + x) * 4
+                    for i = 1, 4 do p[dstIdx + i] = op[srcIdx + i] end
+                end
             end
         end
     end
-
-    return string.char(unpack(result))
+    return self
 end
 
--- Replace region (TiledIn into TiledOut)
-function texture.replace_region(baseInput, baseW, baseH,
-                                replaceInput, repW, repH,
-                                startX, startY,
-                                isFileBase, isFileReplace)
-
-    local baseData = isFileBase and read_texture_file(baseInput) or baseInput
-    local replaceData = isFileReplace and read_texture_file(replaceInput) or replaceInput
-
-    local baseLinear = texture.untile(baseData, baseW, baseH)
-    local replaceLinear = texture.untile(replaceData, repW, repH)
-
-    local modifiedLinear = texture.replace_region_linear(
-        baseLinear, baseW, baseH,
-        replaceLinear, repW, repH,
-        startX, startY
-    )
-
-    return texture.retile(modifiedLinear, baseW, baseH)
+function Texture:color_shift(r, g, b, a)
+    local p = self.pixels
+    local shifts = {r or 0, g or 0, b or 0, a or 0}
+    for i = 1, #p, 4 do
+        for j = 1, 4 do
+            p[i+j-1] = math.max(0, math.min(255, p[i+j-1] + shifts[j]))
+        end
+    end
+    return self
 end
 
-return texture
+return TextureModule
