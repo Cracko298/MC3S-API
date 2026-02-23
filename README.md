@@ -47,7 +47,7 @@ local helmet = textureAPI.load("sdmc:/helmet.3dst", nil, nil, true)
 -- We can use Method Chaining to modify and place the icon
 helmet:clone()              -- Work on a copy
     :rotate_90()            -- Turn it
-    :flip_horizontal()      -- Mirror it
+ -- :flip_horizontal()      -- Mirror it
     :color_shift(0, 0, 255) -- Tint it blue
 
 skin:replace_region(helmet, 32, 48) -- add helmet to skin
