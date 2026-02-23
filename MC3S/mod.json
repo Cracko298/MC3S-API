@@ -1,6 +1,6 @@
 {
     "name": "MC3S",
     "description": "An API for Minecraft3DS using LunaCore API. To modify skins in realtime, support for 'animations'. And loading skins off of the SDMC.",
-    "version": "1.0.1",
+    "version": "0.0.2",
     "dependencies": ["LunaCoreAPI"]
 }
